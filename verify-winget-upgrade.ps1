@@ -207,7 +207,7 @@ $clientPackage.InstallLocation | Set-Content "$toolDir/client-location.txt"
     $endpoint = Wait-For { Get-Content -LiteralPath "$fixture/address.txt" -Raw -ErrorAction SilentlyContinue } 'the TLS catalogue' 10
     Invoke-WebRequest "$endpoint/information" | Out-Null
     Invoke-WinGet @('source', 'add', '--name', $stageSource, '--arg', $endpoint, '--type', 'Microsoft.Rest',
-                    '--explicit', 'true', '--trust-level', 'trusted', '--accept-source-agreements', '--disable-interactivity')
+                    '--explicit', '--trust-level', 'trusted', '--accept-source-agreements', '--disable-interactivity')
     $evidence.stagingSource = (& $script:client source export --name $stageSource) -join "`n"
     if ($LASTEXITCODE -ne 0 -or $evidence.stagingSource -notmatch '"Trusted"') { throw 'Wrong staging source trust level.' }
 
