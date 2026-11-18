@@ -152,9 +152,12 @@ $clientPackage.InstallLocation | Set-Content "$toolDir/client-location.txt"
     Invoke-WinGet @('validate', '--manifest', $legacyManifest)
     Invoke-WinGet (@('install', '--manifest', $legacyManifest) + $options)
     $evidence.registrationBefore = Assert-Version '0.3.0'
-    & $link collector install
-    if ($LASTEXITCODE -ne 0) { throw 'The legacy collector could not start.' }
-    $adapter = Wait-For { Read-Database 'adapter' } 'the legacy collector first SQLite observation'
+    # Seed the legacy database with the official executable, independently of
+    # the retired 0.3.0 startup launcher on the pre-publication local source.
+    & $link collect
+    if ($LASTEXITCODE -ne 0) { throw 'The legacy CLI could not collect a baseline.' }
+    $adapter = Read-Database 'adapter'
+    if (-not $adapter) { throw 'The legacy CLI did not record an adapter baseline.' }
     & $link interface set $adapter
     if ($LASTEXITCODE -ne 0) { throw 'The legacy collector could not save its interface preference.' }
     $savedSettings = (Get-FileHash $settings).Hash
@@ -201,6 +204,9 @@ $clientPackage.InstallLocation | Set-Content "$toolDir/client-location.txt"
 }
 catch {
     $evidence.error = $_.Exception.Message
+    if (Test-Path "$data/collector.log") {
+        Get-Content -LiteralPath "$data/collector.log" -Tail 12 | ForEach-Object { Write-Host $_ }
+    }
     throw
 }
 finally {
