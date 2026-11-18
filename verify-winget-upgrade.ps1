@@ -15,6 +15,8 @@ $link = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\octetledger.exe'
 $database = Join-Path $data 'octetledger.db'
 $settings = Join-Path $data 'settings.json'
 $ready = Join-Path $data 'collector.ready'
+$pidFile = Join-Path $data 'collector.pid'
+$logFile = Join-Path $data 'collector.log'
 $registry = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 if ((Test-Path $link) -or (Test-Path $data)) { throw 'An OctetLedger installation already exists in this profile.' }
 
@@ -58,6 +60,22 @@ function Assert-OfficialExecutable {
     }
     $evidence.executableSha256 = (Get-FileHash $link).Hash.ToLowerInvariant()
     if ($evidence.executableSha256 -ne $expected) { throw 'Installed executable is not the one published for this architecture.' }
+}
+function Get-AliasInfo {
+    $item = Get-Item -LiteralPath $link -Force
+    $target = if ($item.Target) { @($item.Target)[0] } else { $null }
+    [pscustomobject]@{ LinkType = $item.LinkType; Target = $target }
+}
+function Get-ZoneId([string]$Path) {
+    if (-not $Path) { return $null }
+    $zone = Get-Content -LiteralPath $Path -Stream Zone.Identifier -ErrorAction SilentlyContinue
+    $match = [regex]::Match(($zone -join "`n"), 'ZoneId=(\d+)')
+    if ($match.Success) { [int]$match.Groups[1].Value } else { $null }
+}
+function Stop-ProfileLaunchers {
+    Get-CimInstance Win32_Process -Filter "Name='wscript.exe'" |
+        Where-Object { $_.CommandLine -like "*$data*" } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 function Read-Database([string]$Mode) {
     if (-not (Test-Path -LiteralPath $database)) { return }
@@ -175,8 +193,34 @@ $clientPackage.InstallLocation | Set-Content "$toolDir/client-location.txt"
     [void](Read-Database 'verify')
     Record 'WinGet upgraded the single user-scope package in place and preserved SQLite and settings'
 
-    & $link collector install
-    if ($LASTEXITCODE -ne 0) { throw 'Could not re-register the collector after the upgrade.' }
+    $aliasInfo = Get-AliasInfo
+    $evidence.aliasLinkType = $aliasInfo.LinkType
+    $evidence.aliasTarget = $aliasInfo.Target
+    $evidence.zoneIdBeforeInstall = Get-ZoneId $aliasInfo.Target
+    $installOutput = & $link collector install 2>&1
+    $installExit = $LASTEXITCODE
+    $evidence.firstInstallExit = $installExit
+    if ($installExit -ne 0) {
+        $evidence.firstInstallError = ($installOutput -join "`n")
+        $evidence.pidAfterFailure = Test-Path -LiteralPath $pidFile
+        $evidence.readyAfterFailure = Test-Path -LiteralPath $ready
+        $evidence.logAfterFailure = if (Test-Path -LiteralPath $logFile) { Get-Content -LiteralPath $logFile -Raw } else { $null }
+        $evidence.launchersAfterFailure = @(Get-CimInstance Win32_Process -Filter "Name='wscript.exe'" |
+            Where-Object { $_.CommandLine -like "*$data*" } | Select-Object ProcessId, CommandLine)
+        if ($evidence.zoneIdBeforeInstall -ne 3) {
+            throw "Collector install failed without an Internet zone mark. $($installOutput -join ' ')"
+        }
+        Record 'collector install failed with the WinGet Internet zone mark (diagnostic)'
+        Unblock-File -LiteralPath $aliasInfo.Target
+        $evidence.zoneIdAfterUnblock = Get-ZoneId $aliasInfo.Target
+        Stop-ProfileLaunchers
+        $installOutput = & $link collector install 2>&1
+        $installExit = $LASTEXITCODE
+        $evidence.workaroundInstallExit = $installExit
+        if ($installExit -ne 0) { throw "Collector install still failed after Unblock-File. $($installOutput -join ' ')" }
+        $evidence.motwWorkaroundRequired = $true
+        Record 'collector install succeeded after diagnostic Unblock-File'
+    }
     $firstReady = Wait-For { Get-Content -LiteralPath $ready -Raw -ErrorAction SilentlyContinue } 'the updated collector first successful collection'
     $null = Wait-For {
         $current = Get-Content -LiteralPath $ready -Raw -ErrorAction SilentlyContinue
