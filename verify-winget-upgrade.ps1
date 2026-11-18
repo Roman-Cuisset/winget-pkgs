@@ -9,6 +9,7 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hoste
 
 $id = 'RomanCuisset.OctetLedger'
 $manifest = Join-Path $PWD 'manifests/r/RomanCuisset/OctetLedger/0.11.0'
+$legacyManifest = Join-Path $PWD 'manifests/r/RomanCuisset/OctetLedger/0.3.0'
 $data = Join-Path $env:LOCALAPPDATA 'OctetLedger'
 $link = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\octetledger.exe'
 $database = Join-Path $data 'octetledger.db'
@@ -45,8 +46,10 @@ function Assert-Version([string]$Version) {
     $entries = @(Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
         Where-Object DisplayName -eq 'OctetLedger')
     if ($entries.Count -ne 1 -or $entries[0].DisplayVersion -ne $Version) {
-        throw "WinGet did not register one user-scope OctetLedger $Version installation."
+        $registrations = $entries | Select-Object PSChildName,DisplayVersion | ConvertTo-Json -Compress
+        throw "WinGet did not register one user-scope OctetLedger $Version installation. Actual: $registrations"
     }
+    return $entries[0].PSChildName
 }
 function Assert-OfficialExecutable {
     $expected = switch ($env:WINGET_TEST_ARCH) {
@@ -109,6 +112,7 @@ try {
         # Call Appx in Windows PowerShell so DependencyPath stays an array.
         $bootstrap = @'
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $toolDir = $env:OCTETLEDGER_TEST_APP_INSTALLER_PATH
 $dependencies = @(Get-ChildItem "$toolDir/dependencies/$env:WINGET_TEST_ARCH" -File | Where-Object {
     $_.Extension -in '.appx','.msix'
@@ -138,13 +142,16 @@ $clientPackage.InstallLocation | Set-Content "$toolDir/client-location.txt"
     $options = @('--scope', 'user', '--architecture', $env:WINGET_TEST_ARCH,
                  '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity')
     Invoke-WinGet (@('install', '--manifest', $manifest) + $options)
-    Assert-Version '0.11.0'
+    $null = Assert-Version '0.11.0'
     Assert-OfficialExecutable
     Invoke-WinGet @('uninstall', '--id', $id, '--exact', '--accept-source-agreements', '--disable-interactivity')
     Record 'validated manifest, fresh portable install, command alias and uninstall'
 
-    Invoke-WinGet (@('install', '--id', $id, '--exact', '--version', '0.3.0', '--source', 'winget') + $options)
-    Assert-Version '0.3.0'
+    # Both versions need the same source identity. The official 0.3.0 manifest is
+    # mirrored here to stage an upgrade before 0.11.0 enters the public catalogue.
+    Invoke-WinGet @('validate', '--manifest', $legacyManifest)
+    Invoke-WinGet (@('install', '--manifest', $legacyManifest) + $options)
+    $evidence.registrationBefore = Assert-Version '0.3.0'
     & $link collector install
     if ($LASTEXITCODE -ne 0) { throw 'The legacy collector could not start.' }
     $adapter = Wait-For { Read-Database 'adapter' } 'the legacy collector first SQLite observation'
@@ -155,10 +162,11 @@ $clientPackage.InstallLocation | Set-Content "$toolDir/client-location.txt"
     if ($LASTEXITCODE -ne 0) { throw 'The legacy collector could not stop before the upgrade.' }
     $evidence.sourceSchema = [int](Read-Database 'seed')
     if ($evidence.sourceSchema -ne 0) { throw 'Unexpected legacy database schema.' }
-    Record 'installed 0.3.0 from the WinGet catalogue and preserved its preference and historical fixture'
+    Record 'installed 0.3.0 from the published WinGet manifest and seeded a preference and historical fixture'
 
     Invoke-WinGet (@('upgrade', '--manifest', $manifest) + $options)
-    Assert-Version '0.11.0'
+    $evidence.registrationAfter = Assert-Version '0.11.0'
+    if ($evidence.registrationAfter -ne $evidence.registrationBefore) { throw 'The upgrade changed the portable package identity.' }
     Assert-OfficialExecutable
     if ((Get-FileHash $settings).Hash -ne $savedSettings) { throw 'WinGet changed the existing settings.' }
     [void](Read-Database 'verify')
