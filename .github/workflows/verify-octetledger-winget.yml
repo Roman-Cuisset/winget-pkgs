@@ -28,7 +28,14 @@ jobs:
         shell: pwsh
         env:
           WINGET_TEST_ARCH: ${{ matrix.arch }}
-        run: ./verify-winget-upgrade.ps1
+        run: |
+          # Set the repository variables after publishing v0.11.1, from the released executable in each ARCHIVE.
+          $expected = if ('${{ matrix.arch }}' -eq 'x64') {
+            '${{ vars.OCTETLEDGER_0111_EXE_SHA_X64 }}'
+          } else {
+            '${{ vars.OCTETLEDGER_0111_EXE_SHA_ARM64 }}'
+          }
+          ./verify-winget-upgrade.ps1 -ExpectedExecutableSha256 $expected
 
       - name: Retain verification results
         if: always()
