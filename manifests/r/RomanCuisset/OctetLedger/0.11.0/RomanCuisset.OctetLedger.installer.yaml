@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.28.0.schema.json
+PackageIdentifier: RomanCuisset.OctetLedger
+PackageVersion: 0.11.0
+InstallerType: zip
+NestedInstallerType: portable
+UpgradeBehavior: install
+Commands:
+  - octetledger
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/Roman-Cuisset/octet-ledger/releases/download/v0.11.0/OctetLedger-0.11.0-win-x64.zip
+    InstallerSha256: F0C4DBFF093158FDB913CFB74AA063319B7B4365A0CDE5F22FF26D397952E67A
+    NestedInstallerFiles:
+      - RelativeFilePath: octetledger.exe
+        PortableCommandAlias: octetledger
+  - Architecture: arm64
+    InstallerUrl: https://github.com/Roman-Cuisset/octet-ledger/releases/download/v0.11.0/OctetLedger-0.11.0-win-arm64.zip
+    InstallerSha256: 9A56437FFA72D331F909CE05CDB899D0ADA048C743A741BBE79E426AA4967AF8
+    NestedInstallerFiles:
+      - RelativeFilePath: octetledger.exe
+        PortableCommandAlias: octetledger
+ManifestType: installer
+ManifestVersion: 1.28.0

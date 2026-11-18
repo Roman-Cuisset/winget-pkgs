@@ -1,0 +1,39 @@
+name: Validate OctetLedger WinGet upgrade
+
+on:
+  push:
+    branches: [validate-octetledger-winget-0.11.0]
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Test fresh installation and upgrade from the WinGet catalogue
+        shell: pwsh
+        env:
+          WINGET_TEST_ARCH: ${{ matrix.arch }}
+        run: ./verify-winget-upgrade.ps1
+
+      - name: Retain verification results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: winget-upgrade-${{ matrix.arch }}
+          path: evidence/
+          if-no-files-found: warn
