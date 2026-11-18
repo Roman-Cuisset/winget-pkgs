@@ -1,0 +1,24 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.28.0.schema.json
+# TODO: replace the placeholder SHA-256 values with the published v0.11.1 asset hashes before submission.
+PackageIdentifier: RomanCuisset.OctetLedger
+PackageVersion: 0.11.1
+InstallerType: zip
+NestedInstallerType: portable
+UpgradeBehavior: install
+Commands:
+  - octetledger
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/Roman-Cuisset/octet-ledger/releases/download/v0.11.1/OctetLedger-0.11.1-win-x64.zip
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    NestedInstallerFiles:
+      - RelativeFilePath: octetledger.exe
+        PortableCommandAlias: octetledger
+  - Architecture: arm64
+    InstallerUrl: https://github.com/Roman-Cuisset/octet-ledger/releases/download/v0.11.1/OctetLedger-0.11.1-win-arm64.zip
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    NestedInstallerFiles:
+      - RelativeFilePath: octetledger.exe
+        PortableCommandAlias: octetledger
+ManifestType: installer
+ManifestVersion: 1.28.0

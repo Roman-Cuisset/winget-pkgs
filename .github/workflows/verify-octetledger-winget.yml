@@ -2,7 +2,7 @@ name: Validate OctetLedger WinGet upgrade
 
 on:
   push:
-    branches: [validate-octetledger-winget-0.11.0]
+    branches: [validate-octetledger-winget-0.11.1]
 
 permissions:
   contents: read

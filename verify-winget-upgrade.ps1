@@ -1,3 +1,7 @@
+param(
+    [switch]$AllowMotwWorkaround,
+    [string]$ExpectedExecutableSha256
+)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
@@ -8,7 +12,7 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hoste
 }
 
 $id = 'RomanCuisset.OctetLedger'
-$manifest = Join-Path $PWD 'manifests/r/RomanCuisset/OctetLedger/0.11.0'
+$manifest = Join-Path $PWD 'manifests/r/RomanCuisset/OctetLedger/0.11.1'
 $legacyManifest = Join-Path $PWD 'manifests/r/RomanCuisset/OctetLedger/0.3.0'
 $data = Join-Path $env:LOCALAPPDATA 'OctetLedger'
 $link = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\octetledger.exe'
@@ -54,12 +58,13 @@ function Assert-Version([string]$Version) {
     return $entries[0].PSChildName
 }
 function Assert-OfficialExecutable {
-    $expected = switch ($env:WINGET_TEST_ARCH) {
-        'x64' { 'a1ebd68b3fc188499184b4ff483bfd838e7ebd704dcbaea29851ac6964294d2b' }
-        'arm64' { '9b250fa68bba5018b48d36490bf1c50d298472415a1c48ac4cc3d60ea9a4aa31' }
+    if (-not $ExpectedExecutableSha256) {
+        throw 'Pass -ExpectedExecutableSha256 with the published v0.11.1 executable hash for this architecture.'
     }
     $evidence.executableSha256 = (Get-FileHash $link).Hash.ToLowerInvariant()
-    if ($evidence.executableSha256 -ne $expected) { throw 'Installed executable is not the one published for this architecture.' }
+    if ($evidence.executableSha256 -ne $ExpectedExecutableSha256.ToLowerInvariant()) {
+        throw 'Installed executable is not the one published for this architecture.'
+    }
 }
 function Get-AliasInfo {
     $item = Get-Item -LiteralPath $link -Force
@@ -160,7 +165,7 @@ $clientPackage.InstallLocation | Set-Content "$toolDir/client-location.txt"
     $options = @('--scope', 'user', '--architecture', $env:WINGET_TEST_ARCH,
                  '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity')
     Invoke-WinGet (@('install', '--manifest', $manifest) + $options)
-    $null = Assert-Version '0.11.0'
+    $null = Assert-Version '0.11.1'
     Assert-OfficialExecutable
     Invoke-WinGet @('uninstall', '--id', $id, '--exact', '--accept-source-agreements', '--disable-interactivity')
     Record 'validated manifest, fresh portable install, command alias and uninstall'
@@ -186,7 +191,7 @@ $clientPackage.InstallLocation | Set-Content "$toolDir/client-location.txt"
     Record 'installed 0.3.0 from the published WinGet manifest and seeded a preference and historical fixture'
 
     Invoke-WinGet (@('upgrade', '--manifest', $manifest) + $options)
-    $evidence.registrationAfter = Assert-Version '0.11.0'
+    $evidence.registrationAfter = Assert-Version '0.11.1'
     if ($evidence.registrationAfter -ne $evidence.registrationBefore) { throw 'The upgrade changed the portable package identity.' }
     Assert-OfficialExecutable
     if ((Get-FileHash $settings).Hash -ne $savedSettings) { throw 'WinGet changed the existing settings.' }
@@ -210,6 +215,9 @@ $clientPackage.InstallLocation | Set-Content "$toolDir/client-location.txt"
         if ($evidence.zoneIdBeforeInstall -ne 3) {
             throw "Collector install failed without an Internet zone mark. $($installOutput -join ' ')"
         }
+        if (-not $AllowMotwWorkaround) {
+            throw "collector install was blocked by the WinGet Internet zone mark (ZoneId=3); v0.11.1 must clear it automatically. $($installOutput -join ' ')"
+        }
         Record 'collector install failed with the WinGet Internet zone mark (diagnostic)'
         Unblock-File -LiteralPath $aliasInfo.Target
         $evidence.zoneIdAfterUnblock = Get-ZoneId $aliasInfo.Target
@@ -220,6 +228,10 @@ $clientPackage.InstallLocation | Set-Content "$toolDir/client-location.txt"
         if ($installExit -ne 0) { throw "Collector install still failed after Unblock-File. $($installOutput -join ' ')" }
         $evidence.motwWorkaroundRequired = $true
         Record 'collector install succeeded after diagnostic Unblock-File'
+    }
+    $evidence.zoneIdAfterInstall = Get-ZoneId $aliasInfo.Target
+    if ($installExit -eq 0 -and $evidence.zoneIdAfterInstall -eq 3) {
+        throw 'collector install succeeded but left the Internet zone mark in place.'
     }
     $firstReady = Wait-For { Get-Content -LiteralPath $ready -Raw -ErrorAction SilentlyContinue } 'the updated collector first successful collection'
     $null = Wait-For {
