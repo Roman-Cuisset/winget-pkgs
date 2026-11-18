@@ -18,29 +18,50 @@ jobs:
           - arch: arm64
             runner: windows-11-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 18
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      - name: Test fresh installation and upgrade from the WinGet catalogue
+      - uses: actions/checkout@v7
+        with:
+          repository: Roman-Cuisset/octet-ledger
+          ref: 960628379f386b4fc7ac8be72371eb66ecd0bfd4
+          path: candidate-src
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build native release candidate
         shell: pwsh
         env:
           WINGET_TEST_ARCH: ${{ matrix.arch }}
         run: |
-          # Set the repository variables after publishing v0.11.1, from the released executable in each ARCHIVE.
-          $expected = if ('${{ matrix.arch }}' -eq 'x64') {
-            '${{ vars.OCTETLEDGER_0111_EXE_SHA_X64 }}'
-          } else {
-            '${{ vars.OCTETLEDGER_0111_EXE_SHA_ARM64 }}'
-          }
-          ./verify-winget-upgrade.ps1 -ExpectedExecutableSha256 $expected
+          if ($env:RUNNER_ARCH.ToLowerInvariant() -ne $env:WINGET_TEST_ARCH) { throw 'Unexpected runner architecture.' }
+          $runtime = "win-$env:WINGET_TEST_ARCH"
+          dotnet publish candidate-src/src/OctetLedger.Cli/OctetLedger.Cli.csproj -c Release -r $runtime --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -o candidate/build
+          if ($LASTEXITCODE -ne 0) { throw 'Candidate build failed.' }
+          if ((& ./candidate/build/octetledger.exe version) -ne 'OctetLedger 0.11.1' -or $LASTEXITCODE -ne 0) { throw 'Unexpected candidate version.' }
+          ./candidate-src/scripts/package.ps1 -Version 0.11.1 -Runtime $runtime -Executable ./candidate/build/octetledger.exe -OutputDirectory ./candidate
+
+      - name: Test upgrade in a native WinGet prepublication source
+        shell: pwsh
+        env:
+          WINGET_TEST_ARCH: ${{ matrix.arch }}
+        run: |
+          $expected = (Get-FileHash -LiteralPath ./candidate/build/octetledger.exe).Hash
+          ./verify-winget-upgrade.ps1 -CandidateArchive "./candidate/OctetLedger-0.11.1-win-$env:WINGET_TEST_ARCH.zip" -ExpectedExecutableSha256 $expected
 
       - name: Retain verification results
         if: always()
         uses: actions/upload-artifact@v6
         with:
           name: winget-upgrade-${{ matrix.arch }}
-          path: evidence/
-          if-no-files-found: warn
+          path: |
+            evidence/
+            candidate/*.zip
+            candidate/*.zip.sha256
+          if-no-files-found: error

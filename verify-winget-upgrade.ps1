@@ -1,19 +1,22 @@
 param(
-    [switch]$AllowMotwWorkaround,
-    [string]$ExpectedExecutableSha256
+    [Parameter(Mandatory)][string]$CandidateArchive,
+    [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$ExpectedExecutableSha256
 )
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or
+    $env:GITHUB_REPOSITORY -ne 'Roman-Cuisset/winget-pkgs' -or
     $env:RUNNER_ARCH.ToLowerInvariant() -ne $env:WINGET_TEST_ARCH -or
     [Environment]::GetFolderPath('LocalApplicationData') -ne $env:LOCALAPPDATA) {
     throw 'This test must use an isolated native GitHub-hosted Windows profile.'
 }
 
 $id = 'RomanCuisset.OctetLedger'
-$manifest = Join-Path $PWD 'manifests/r/RomanCuisset/OctetLedger/0.11.1'
-$legacyManifest = Join-Path $PWD 'manifests/r/RomanCuisset/OctetLedger/0.3.0'
+$stageSource = 'OctetLedgerStage'
+$candidatePath = (Resolve-Path -LiteralPath $CandidateArchive).Path
+$fixture = Join-Path $env:RUNNER_TEMP 'octetledger-https-catalogue'
+$sourceProcess = $certificate = $certificateStore = $null
 $data = Join-Path $env:LOCALAPPDATA 'OctetLedger'
 $link = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\octetledger.exe'
 $database = Join-Path $data 'octetledger.db'
@@ -27,6 +30,7 @@ if ((Test-Path $link) -or (Test-Path $data)) { throw 'An OctetLedger installatio
 $evidence = [ordered]@{
     status = 'fail'
     architecture = $env:WINGET_TEST_ARCH
+    candidateZipSha256 = (Get-FileHash -LiteralPath $candidatePath).Hash
     steps = [Collections.Generic.List[string]]::new()
 }
 function Record([string]$Step) {
@@ -57,18 +61,16 @@ function Assert-Version([string]$Version) {
     }
     return $entries[0].PSChildName
 }
-function Assert-OfficialExecutable {
-    if (-not $ExpectedExecutableSha256) {
-        throw 'Pass -ExpectedExecutableSha256 with the published v0.11.1 executable hash for this architecture.'
-    }
+function Assert-CandidateExecutable {
     $evidence.executableSha256 = (Get-FileHash $link).Hash.ToLowerInvariant()
     if ($evidence.executableSha256 -ne $ExpectedExecutableSha256.ToLowerInvariant()) {
-        throw 'Installed executable is not the one published for this architecture.'
+        throw 'Installed executable does not match the native build for this architecture.'
     }
 }
 function Get-AliasInfo {
     $item = Get-Item -LiteralPath $link -Force
-    $target = if ($item.Target) { @($item.Target)[0] } else { $null }
+    $target = $item.ResolveLinkTarget($true).FullName
+    if ($item.LinkType -ne 'SymbolicLink' -or -not $target) { throw 'WinGet did not create the expected portable symlink.' }
     [pscustomobject]@{ LinkType = $item.LinkType; Target = $target }
 }
 function Get-ZoneId([string]$Path) {
@@ -76,11 +78,6 @@ function Get-ZoneId([string]$Path) {
     $zone = Get-Content -LiteralPath $Path -Stream Zone.Identifier -ErrorAction SilentlyContinue
     $match = [regex]::Match(($zone -join "`n"), 'ZoneId=(\d+)')
     if ($match.Success) { [int]$match.Groups[1].Value } else { $null }
-}
-function Stop-ProfileLaunchers {
-    Get-CimInstance Win32_Process -Filter "Name='wscript.exe'" |
-        Where-Object { $_.CommandLine -like "*$data*" } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 function Read-Database([string]$Mode) {
     if (-not (Test-Path -LiteralPath $database)) { return }
@@ -160,23 +157,66 @@ $clientPackage.InstallLocation | Set-Content "$toolDir/client-location.txt"
     'WScript.Echo "VBScript OK"' | Set-Content -LiteralPath $probe -Encoding ascii
     if ((& cscript.exe //nologo $probe) -ne 'VBScript OK' -or $LASTEXITCODE -ne 0) { throw 'VBScript is not available on this runner.' }
 
-    Invoke-WinGet @('validate', '--manifest', $manifest)
-    Invoke-WinGet @('settings', '--enable', 'LocalManifestFiles')
     $options = @('--scope', 'user', '--architecture', $env:WINGET_TEST_ARCH,
                  '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity')
-    Invoke-WinGet (@('install', '--manifest', $manifest) + $options)
-    $null = Assert-Version '0.11.1'
-    Assert-OfficialExecutable
-    Invoke-WinGet @('uninstall', '--id', $id, '--exact', '--accept-source-agreements', '--disable-interactivity')
-    Record 'validated manifest, fresh portable install, command alias and uninstall'
+    $mpStatus = Get-MpComputerStatus -ErrorAction SilentlyContinue
+    if ($mpStatus) {
+        $evidence.defender = $mpStatus | Select-Object AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled
+    }
 
-    # Both versions need the same source identity. The official 0.3.0 manifest is
-    # mirrored here to stage an upgrade before 0.11.0 enters the public catalogue.
-    Invoke-WinGet @('validate', '--manifest', $legacyManifest)
-    Invoke-WinGet (@('install', '--manifest', $legacyManifest) + $options)
+    $evidence.communitySource = (& $script:client source export --name winget) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or $evidence.communitySource -notmatch '"Trusted"') {
+        throw 'Could not verify the trust level of the public WinGet source.'
+    }
+    Invoke-WinGet (@('install', '--id', $id, '--exact', '--version', '0.3.0', '--source', 'winget') + $options)
+    $evidence.communityRegistration = Assert-Version '0.3.0'
+    $evidence.communityZoneId = Get-ZoneId (Get-AliasInfo).Target
+    Invoke-WinGet @('uninstall', '--id', $id, '--exact', '--source', 'winget', '--accept-source-agreements', '--disable-interactivity')
+    Record 'measured the portable payload zone from the official Microsoft catalogue'
+
+    # Use a disposable loopback TLS certificate for the isolated REST source.
+    # WinGet applies its normal catalogue trust rules and verifies both ZIP hashes.
+    New-Item -ItemType Directory -Path $fixture | Out-Null
+    $rsa = [Security.Cryptography.RSA]::Create(2048)
+    try {
+        $request = [Security.Cryptography.X509Certificates.CertificateRequest]::new(
+            'CN=OctetLedger WinGet loopback validation', $rsa, [Security.Cryptography.HashAlgorithmName]::SHA256,
+            [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+        $san = [Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
+        $san.AddIpAddress([Net.IPAddress]::Loopback)
+        $request.CertificateExtensions.Add($san.Build())
+        $request.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($false, $false, 0, $true))
+        $eku = [Security.Cryptography.OidCollection]::new()
+        [void]$eku.Add([Security.Cryptography.Oid]::new('1.3.6.1.5.5.7.3.1'))
+        $request.CertificateExtensions.Add([Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($eku, $false))
+        $now = [DateTimeOffset]::UtcNow
+        $leaf = $request.CreateSelfSigned($now.AddMinutes(-5), $now.AddHours(1))
+        try {
+            [IO.File]::WriteAllText("$fixture/certificate.pem", $leaf.ExportCertificatePem())
+            [IO.File]::WriteAllText("$fixture/key.pem", $rsa.ExportPkcs8PrivateKeyPem())
+            $certificate = [Security.Cryptography.X509Certificates.X509CertificateLoader]::LoadCertificate($leaf.RawData)
+        } finally { $leaf.Dispose() }
+    } finally { $rsa.Dispose() }
+    $certificateStore = [Security.Cryptography.X509Certificates.X509Store]::new('Root', 'LocalMachine')
+    $certificateStore.Open([Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+    $certificateStore.Add($certificate)
+    $sourceProcess = Start-Process python -WindowStyle Hidden -PassThru -RedirectStandardError "$fixture/server.log" -ArgumentList @(
+        '-u', "`"$PSScriptRoot/serve-winget-candidate.py`"", $env:WINGET_TEST_ARCH, "`"$candidatePath`"",
+        "`"$fixture/certificate.pem`"", "`"$fixture/key.pem`"", "`"$fixture/address.txt`""
+    )
+    $endpoint = Wait-For { Get-Content -LiteralPath "$fixture/address.txt" -Raw -ErrorAction SilentlyContinue } 'the TLS catalogue' 10
+    Invoke-WebRequest "$endpoint/information" | Out-Null
+    Invoke-WinGet @('source', 'add', '--name', $stageSource, '--arg', $endpoint, '--type', 'Microsoft.Rest',
+                    '--explicit', 'true', '--trust-level', 'trusted', '--accept-source-agreements', '--disable-interactivity')
+    $evidence.stagingSource = (& $script:client source export --name $stageSource) -join "`n"
+    if ($LASTEXITCODE -ne 0 -or $evidence.stagingSource -notmatch '"Trusted"') { throw 'Wrong staging source trust level.' }
+
+    Invoke-WinGet (@('install', '--id', $id, '--exact', '--version', '0.3.0', '--source', $stageSource) + $options)
     $evidence.registrationBefore = Assert-Version '0.3.0'
+    $evidence.stagedLegacyZoneId = Get-ZoneId (Get-AliasInfo).Target
+    if ($evidence.stagedLegacyZoneId -ne $evidence.communityZoneId) { throw 'The staged legacy package zone differs from the official catalogue.' }
     # Seed the legacy database with the official executable, independently of
-    # the retired 0.3.0 startup launcher on the pre-publication local source.
+    # the retired 0.3.0 startup launcher.
     & $link collect
     if ($LASTEXITCODE -ne 0) { throw 'The legacy CLI could not collect a baseline.' }
     $adapter = Read-Database 'adapter'
@@ -190,10 +230,10 @@ $clientPackage.InstallLocation | Set-Content "$toolDir/client-location.txt"
     if ($evidence.sourceSchema -ne 0) { throw 'Unexpected legacy database schema.' }
     Record 'installed 0.3.0 from the published WinGet manifest and seeded a preference and historical fixture'
 
-    Invoke-WinGet (@('upgrade', '--manifest', $manifest) + $options)
+    Invoke-WinGet (@('upgrade', '--id', $id, '--exact', '--version', '0.11.1', '--source', $stageSource) + $options)
     $evidence.registrationAfter = Assert-Version '0.11.1'
     if ($evidence.registrationAfter -ne $evidence.registrationBefore) { throw 'The upgrade changed the portable package identity.' }
-    Assert-OfficialExecutable
+    Assert-CandidateExecutable
     if ((Get-FileHash $settings).Hash -ne $savedSettings) { throw 'WinGet changed the existing settings.' }
     [void](Read-Database 'verify')
     Record 'WinGet upgraded the single user-scope package in place and preserved SQLite and settings'
@@ -212,27 +252,10 @@ $clientPackage.InstallLocation | Set-Content "$toolDir/client-location.txt"
         $evidence.logAfterFailure = if (Test-Path -LiteralPath $logFile) { Get-Content -LiteralPath $logFile -Raw } else { $null }
         $evidence.launchersAfterFailure = @(Get-CimInstance Win32_Process -Filter "Name='wscript.exe'" |
             Where-Object { $_.CommandLine -like "*$data*" } | Select-Object ProcessId, CommandLine)
-        if ($evidence.zoneIdBeforeInstall -ne 3) {
-            throw "Collector install failed without an Internet zone mark. $($installOutput -join ' ')"
-        }
-        if (-not $AllowMotwWorkaround) {
-            throw "collector install was blocked by the WinGet Internet zone mark (ZoneId=3); v0.11.1 must clear it automatically. $($installOutput -join ' ')"
-        }
-        Record 'collector install failed with the WinGet Internet zone mark (diagnostic)'
-        Unblock-File -LiteralPath $aliasInfo.Target
-        $evidence.zoneIdAfterUnblock = Get-ZoneId $aliasInfo.Target
-        Stop-ProfileLaunchers
-        $installOutput = & $link collector install 2>&1
-        $installExit = $LASTEXITCODE
-        $evidence.workaroundInstallExit = $installExit
-        if ($installExit -ne 0) { throw "Collector install still failed after Unblock-File. $($installOutput -join ' ')" }
-        $evidence.motwWorkaroundRequired = $true
-        Record 'collector install succeeded after diagnostic Unblock-File'
+        throw "Collector install failed with WinGet zone '$($evidence.zoneIdBeforeInstall)'. $($installOutput -join ' ')"
     }
     $evidence.zoneIdAfterInstall = Get-ZoneId $aliasInfo.Target
-    if ($installExit -eq 0 -and $evidence.zoneIdAfterInstall -eq 3) {
-        throw 'collector install succeeded but left the Internet zone mark in place.'
-    }
+    if ($evidence.zoneIdAfterInstall -ne $evidence.zoneIdBeforeInstall) { throw 'Collector registration changed the Windows zone mark.' }
     $firstReady = Wait-For { Get-Content -LiteralPath $ready -Raw -ErrorAction SilentlyContinue } 'the updated collector first successful collection'
     $null = Wait-For {
         $current = Get-Content -LiteralPath $ready -Raw -ErrorAction SilentlyContinue
@@ -249,9 +272,17 @@ $clientPackage.InstallLocation | Set-Content "$toolDir/client-location.txt"
         throw 'SQLite migration, settings or collector registrations did not match the upgrade contract.'
     }
     Record 're-registered collector, two successful samples, historical bytes and settings preserved'
+    $worker = [int]((Get-Content -LiteralPath $pidFile -Raw).Split('|')[0])
+    if (-not (Get-Process -Id $worker -ErrorAction SilentlyContinue)) { throw 'Collector PID does not identify a live worker.' }
+    & $link collector stop
+    if ($LASTEXITCODE -ne 0 -or (Get-Process -Id $worker -ErrorAction SilentlyContinue)) { throw 'Collector stop did not wait for the worker to exit.' }
+    Record 'collector stop waited for the live worker to exit'
     & $link collector uninstall
     if ($LASTEXITCODE -ne 0) { throw 'Could not unregister the test collector.' }
-    Invoke-WinGet @('uninstall', '--id', $id, '--exact', '--accept-source-agreements', '--disable-interactivity')
+    if ((Get-ItemProperty -LiteralPath $registry).PSObject.Properties.Name -like 'OctetLedger Collector*' -or
+        (Get-ScheduledTask -TaskName 'OctetLedger Watchdog*' -ErrorAction SilentlyContinue)) { throw 'Collector registrations survived uninstall.' }
+    Invoke-WinGet @('uninstall', '--id', $id, '--exact', '--source', $stageSource, '--accept-source-agreements', '--disable-interactivity')
+    if ((Test-Path -LiteralPath $link) -or (Test-Path -LiteralPath $aliasInfo.Target)) { throw 'WinGet left the executable or its alias behind.' }
     if ((Get-FileHash $settings).Hash -ne $savedSettings -or [int](Read-Database 'verify') -ne 6) {
         throw 'Uninstall changed history or settings.'
     }
@@ -266,6 +297,16 @@ catch {
     throw
 }
 finally {
+    if ($sourceProcess) {
+        if (-not $sourceProcess.HasExited) { Stop-Process -InputObject $sourceProcess -ErrorAction SilentlyContinue }
+        $sourceProcess.Dispose()
+    }
+    if ($certificateStore) {
+        if ($certificate) { $certificateStore.Remove($certificate) }
+        $certificateStore.Dispose()
+    }
+    if ($certificate) { $certificate.Dispose() }
     New-Item -ItemType Directory -Path evidence -Force | Out-Null
+    if (Test-Path -LiteralPath "$fixture/server.log") { Copy-Item -LiteralPath "$fixture/server.log" -Destination evidence/ }
     $evidence | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath "evidence/winget-$env:WINGET_TEST_ARCH.json"
 }
