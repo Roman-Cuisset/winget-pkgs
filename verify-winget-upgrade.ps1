@@ -159,10 +159,16 @@ $clientPackage.InstallLocation | Set-Content "$toolDir/client-location.txt"
 
     $options = @('--scope', 'user', '--architecture', $env:WINGET_TEST_ARCH,
                  '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity')
-    $mpStatus = Get-MpComputerStatus -ErrorAction SilentlyContinue
-    if ($mpStatus) {
-        $evidence.defender = $mpStatus | Select-Object AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled
+    $mpStatus = Get-MpComputerStatus
+    $evidence.defenderAtStart = $mpStatus | Select-Object AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled
+    if (-not $mpStatus.RealTimeProtectionEnabled) {
+        Set-MpPreference -DisableRealtimeMonitoring $false
     }
+    $mpStatus = Wait-For {
+        $current = Get-MpComputerStatus
+        if ($current.AMServiceEnabled -and $current.AntivirusEnabled -and $current.RealTimeProtectionEnabled) { $current }
+    } 'Defender real-time protection' 30
+    $evidence.defender = $mpStatus | Select-Object AMServiceEnabled,AntivirusEnabled,RealTimeProtectionEnabled
 
     $evidence.communitySource = (& $script:client source export --name winget) -join "`n"
     if ($LASTEXITCODE -ne 0 -or $evidence.communitySource -notmatch '"Trusted"') {
@@ -287,6 +293,8 @@ $clientPackage.InstallLocation | Set-Content "$toolDir/client-location.txt"
         throw 'Uninstall changed history or settings.'
     }
     Record 'uninstalled portable package while preserving its SQLite database and settings'
+    $evidence.defenderAtEnd = (Get-MpComputerStatus).RealTimeProtectionEnabled
+    if (-not $evidence.defenderAtEnd) { throw 'Defender real-time protection was no longer enabled at the end of the scenario.' }
     $evidence.status = 'pass'
 }
 catch {
