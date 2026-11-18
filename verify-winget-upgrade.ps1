@@ -94,14 +94,29 @@ with sqlite3.connect(uri, uri=True) as db:
 }
 try {
     $command = Get-Command winget.exe -ErrorAction SilentlyContinue
-    $installedClientVersion = if ($command) { (& $command.Source --version 2>$null) -join '' }
-    if ($installedClientVersion -notmatch '^v(\d+\.\d+)' -or [version]$Matches[1] -lt [version]'1.28') {
-        Install-Module Microsoft.WinGet.Client -Repository PSGallery -Scope CurrentUser -Force
-        Import-Module Microsoft.WinGet.Client
-        Repair-WinGetPackageManager -AllUsers -Latest
-        $command = Get-Command winget.exe -ErrorAction Stop
+    $installedClientVersion = if ($command) { (& $command.Source --version 2>$null) -join '' } else { '' }
+    $match = [regex]::Match($installedClientVersion, '^v(\d+\.\d+)')
+    if (-not $match.Success -or [version]$match.Groups[1].Value -lt [version]'1.28') {
+        $toolDir = Join-Path $env:RUNNER_TEMP 'official-winget'
+        New-Item -ItemType Directory -Path $toolDir -Force | Out-Null
+        $toolRelease = 'https://github.com/microsoft/winget-cli/releases/download/v1.29.380'
+        $bundle = Join-Path $toolDir 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle'
+        $dependencyArchive = Join-Path $toolDir 'DesktopAppInstaller_Dependencies.zip'
+        Invoke-WebRequest "$toolRelease/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle" -OutFile $bundle
+        Invoke-WebRequest "$toolRelease/DesktopAppInstaller_Dependencies.zip" -OutFile $dependencyArchive
+        Expand-Archive -LiteralPath $dependencyArchive -DestinationPath "$toolDir/dependencies"
+        $dependencies = @(Get-ChildItem "$toolDir/dependencies" -Recurse -File | Where-Object {
+            $_.Extension -in '.appx','.msix' -and $_.Directory.Name -eq $env:WINGET_TEST_ARCH
+        } | ForEach-Object FullName)
+        if (-not $dependencies.Count) { throw 'No matching App Installer framework packages.' }
+        Import-Module Appx -UseWindowsPowerShell
+        Add-AppxPackage -Path $bundle -DependencyPath $dependencies -ForceApplicationShutdown
+        $clientPackage = Get-AppxPackage -Name Microsoft.DesktopAppInstaller | Sort-Object Version -Descending | Select-Object -First 1
+        $script:client = Join-Path $clientPackage.InstallLocation 'winget.exe'
     }
-    $script:client = $command.Source
+    else {
+        $script:client = $command.Source
+    }
     $evidence.clientVersion = (& $script:client --version).Trim()
     if ($LASTEXITCODE -ne 0 -or $evidence.clientVersion -notmatch '^v\d') { throw 'Native WinGet client unavailable.' }
 
