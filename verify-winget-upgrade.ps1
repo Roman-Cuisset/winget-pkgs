@@ -105,14 +105,23 @@ try {
         Invoke-WebRequest "$toolRelease/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle" -OutFile $bundle
         Invoke-WebRequest "$toolRelease/DesktopAppInstaller_Dependencies.zip" -OutFile $dependencyArchive
         Expand-Archive -LiteralPath $dependencyArchive -DestinationPath "$toolDir/dependencies"
-        $dependencies = @(Get-ChildItem "$toolDir/dependencies" -Recurse -File | Where-Object {
-            $_.Extension -in '.appx','.msix' -and $_.Directory.Name -eq $env:WINGET_TEST_ARCH
-        } | ForEach-Object FullName)
-        if (-not $dependencies.Count) { throw 'No matching App Installer framework packages.' }
-        Import-Module Appx -UseWindowsPowerShell
-        Add-AppxPackage -Path $bundle -DependencyPath $dependencies -ForceApplicationShutdown
-        $clientPackage = Get-AppxPackage -Name Microsoft.DesktopAppInstaller | Sort-Object Version -Descending | Select-Object -First 1
-        $script:client = Join-Path $clientPackage.InstallLocation 'winget.exe'
+        $env:OCTETLEDGER_TEST_APP_INSTALLER_PATH = $toolDir
+        # Call Appx in Windows PowerShell so DependencyPath stays an array.
+        $bootstrap = @'
+$ErrorActionPreference = 'Stop'
+$toolDir = $env:OCTETLEDGER_TEST_APP_INSTALLER_PATH
+$dependencies = @(Get-ChildItem "$toolDir/dependencies/$env:WINGET_TEST_ARCH" -File | Where-Object {
+    $_.Extension -in '.appx','.msix'
+} | ForEach-Object FullName)
+if (-not $dependencies.Count) { throw 'No matching App Installer framework packages.' }
+Add-AppxPackage -Path "$toolDir/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle" -DependencyPath $dependencies -ForceApplicationShutdown
+$clientPackage = Get-AppxPackage -Name Microsoft.DesktopAppInstaller | Sort-Object Version -Descending | Select-Object -First 1
+$clientPackage.InstallLocation | Set-Content "$toolDir/client-location.txt"
+'@
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
+        & powershell.exe -NoProfile -NonInteractive -EncodedCommand $encoded
+        if ($LASTEXITCODE -ne 0) { throw 'Official App Installer setup failed.' }
+        $script:client = Join-Path (Get-Content "$toolDir/client-location.txt").Trim() 'winget.exe'
     }
     else {
         $script:client = $command.Source
